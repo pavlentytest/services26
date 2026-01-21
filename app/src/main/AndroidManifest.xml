@@ -15,7 +15,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
-        <service android:name=".MyDelayService" android:exported="false" />
+        <service android:name=".RandomNumberService" android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -1,14 +1,14 @@
 package com.example.myapplication
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.Service
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.ServiceConnection
 import android.content.pm.ServiceInfo
+import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -20,10 +20,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,8 +49,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable.isActive
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.random.Random
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,75 +62,96 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    DelayTimerScreen()
+                    RandomNumberScreen()
                 }
             }
         }
     }
 }
-@Composable
-fun DelayTimerScreen() {
-    var secondsInput by remember { mutableStateOf("30") }
-    val context = LocalContext.current
+class RandomNumberService : Service() {
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        OutlinedTextField(
-            value = secondsInput,
-            onValueChange = { secondsInput = it },
-            label = { Text("Секунды") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-        )
+    private val binder = LocalBinder()
+    private var number = 0
+    private var job: Job? = null
+    private val _numberFlow = MutableSharedFlow<Int>(replay = 1)
 
-        Spacer(modifier = Modifier.height(32.dp))
+    val numberFlow: SharedFlow<Int> get() = _numberFlow
 
-        Button(onClick = {
-            val sec = secondsInput.toIntOrNull() ?: 30
-            val intent = Intent(context, MyDelayService::class.java).apply {
-                putExtra("SECONDS", sec)
+    inner class LocalBinder : Binder() {
+        fun getService(): RandomNumberService = this@RandomNumberService
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onCreate() {
+        super.onCreate()
+        startGenerating()
+    }
+
+    private fun startGenerating() {
+        job = CoroutineScope(Dispatchers.Default).launch {
+            while (isActive) {
+                delay(1000)
+                number = Random.nextInt(0, 101)
+                _numberFlow.emit(number)
             }
-            context.startService(intent)
-        }) {
-            Text("Запустить таймер")
         }
+    }
+
+    override fun onDestroy() {
+        job?.cancel()
+        super.onDestroy()
     }
 }
 
-class MyDelayService : Service() {
+@Composable
+fun RandomNumberScreen() {
+    val context = LocalContext.current
+    var isBound by remember { mutableStateOf(false) }
+    var currentNumber by remember { mutableIntStateOf(0) }
+    var serviceConnection: ServiceConnection? by remember { mutableStateOf(null) }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val seconds = intent?.getIntExtra("SECONDS", 30) ?: 30
+    val scope = rememberCoroutineScope()
 
-        CoroutineScope(Dispatchers.Default).launch {
-            delay(seconds * 1000L)
+    DisposableEffect(isBound) {
+        if (isBound) {
+            val conn = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                    val serv = (binder as RandomNumberService.LocalBinder).getService()
+                    scope.launch {
+                        serv.numberFlow.collect { num ->
+                            currentNumber = num
+                        }
+                    }
+                }
+                override fun onServiceDisconnected(name: ComponentName?) {}
+            }
+            serviceConnection = conn
 
-            showCompletionNotification()
-
-            stopSelf()           // важно — сами завершаем
+            val intent = Intent(context, RandomNumberService::class.java)
+            context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
         }
 
-        return START_NOT_STICKY
-    }
-
-    private fun showCompletionNotification() {
-        val notification = NotificationCompat.Builder(this, "delay_channel")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("Таймер завершён")
-            .setContentText("Время вышло!")
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-            .build()
-
-        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel("delay_channel", "Таймеры", NotificationManager.IMPORTANCE_DEFAULT)
-            nm.createNotificationChannel(ch)
+        onDispose {
+            serviceConnection?.let { context.unbindService(it) }
         }
-        nm.notify(1002, notification)
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    Column(
+        Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = if (isBound) "$currentNumber" else "—",
+            fontSize = 88.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(Modifier.height(64.dp))
+
+        Button(onClick = { isBound = !isBound }) {
+            Text(if (isBound) "Отключиться" else "Подключиться")
+        }
+    }
 }
